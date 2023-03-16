@@ -1,0 +1,336 @@
+---
+title: "Breast cancer ARN-Seq data"
+output: html_document
+date: "2023-02-10"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Load packages
+```{r include=FALSE}
+library(SummarizedExperiment)
+library(TCGAbiolinks)
+library(EDASeq)
+library(dplyr)
+library(NOISeq)
+library(DESeq2)
+library(biomaRt)
+
+```
+
+
+### Download annotation file from BiomaRt
+
+
+
+```{r echo=FALSE}
+ensembl <- useEnsembl(biomart = "genes", dataset = "hsapiens_gene_ensembl", mirror = "www")
+
+features <- c("ensembl_gene_id", "chromosome_name", 
+              "start_position", "end_position", "hgnc_symbol",	
+              "percentage_gene_gc_content", "gene_biotype")
+chrs <- c(1:22, "X", "Y")
+
+annot2 <- getBM(attributes = features1,
+      filters = "chromosome_name",
+      values = chrs, 
+      mart = ensembl)
+
+colnames(annot)<-c("ensembl_gene_id", "Chr", "Start", "End", "HGNC_symbol", "GC", "Type")
+annot$Length <- abs(annot$End - annot$Start)
+
+
+
+###################
+library(tibble)
+library(biomaRt)
+
+
+mart <- useMart("ENSEMBL_MART_ENSEMBL")
+mart <- useDataset("hsapiens_gene_ensembl", mart)
+
+
+biomaRt.rnas2 <- getBM(
+  mart=mart,
+  attributes=c("ensembl_gene_id", "external_gene_name"),
+  filter="ensembl_gene_id",
+  values=rownames(rnas2),
+  uniqueRows=TRUE)
+
+###################
+```
+
+### Download ARN Seq from TCGA project
+
+You can also embed plots, for example:
+
+```{r include=FALSE}
+query <- GDCquery(project = "TCGA-BRCA",
+                  data.category = "Transcriptome Profiling",
+                  data.type = "Gene Expression Quantification", 
+                  workflow.type = "STAR - Counts")
+
+samplesDown <- getResults(query,cols=c("cases"))
+
+half <- samplesDown[1:553]
+other_half <- samplesDown[554:1231]
+
+queryDown_half <- GDCquery(project = "TCGA-BRCA", 
+                      data.category = "Transcriptome Profiling",
+                      data.type = "Gene Expression Quantification",
+                      workflow.type = "STAR - Counts",  
+                      barcode = half)
+
+queryDown_other_half <- GDCquery(project = "TCGA-BRCA", 
+                      data.category = "Transcriptome Profiling",
+                      data.type = "Gene Expression Quantification",
+                      workflow.type = "STAR - Counts",  
+                      barcode = other_half)
+
+
+GDCdownload(query = queryDown_half) 
+GDCdownload(query = queryDown_other_half)
+
+dataPrep1_1 <- GDCprepare(query = queryDown_half)
+dataPrep1_2 <- GDCprepare(query = queryDown_other_half)
+
+```
+
+
+### Filter the data to retain only relevant samples.
+
+```{r}
+BC1.T <- dataPrep1_1[ , dataPrep1_1$sample_type == "Primary Tumor"]
+BC1.N <- dataPrep1_1[ , dataPrep1_1$sample_type == "Solid Tissue Normal"]
+
+BC2.T <- dataPrep1_2[ , dataPrep1_2$sample_type == "Primary Tumor"]
+BC2.N <- dataPrep1_2[ , dataPrep1_2$sample_type == "Solid Tissue Normal"]
+
+```
+
+
+### Getting TCGA IDs with equal or more than 60% tumor purity
+
+Purity.BRCA.1<-TCGAtumor_purity(colnames(BC1.T), 0,0,0,0,0.6)$pure_barcodes
+### 424
+
+Purity.BRCA.2<-TCGAtumor_purity(colnames(BC2.T), 0,0,0,0,0.6)$pure_barcodes
+### 516
+
+## Subset IDs purity equal or more than 60% AND with PAM50 class
+
+```{r}
+diff.1 <- setdiff(Purity.BRCA.1,
+                  TCGA_MolecularSubtype(half)$filtered) 
+
+diff.2 <- setdiff(Purity.BRCA.2,
+                  TCGA_MolecularSubtype(other_half)$filtered) 
+```
+
+
+### all IDs (with >= 60 % tumor purity) had molecular classification
+
+
+
+### Bind raw expression matrices from the cancer phenotype and the normal
+phenotype into the object "rna"
+
+
+```{r}
+rnas <- cbind(assay(BC1.T)[,diff.1], assay(BC2.T)[,diff.2], assay(BC1.N), assay(BC2.N))
+```
+
+###
+```{r}
+mol_subtypes.1 <-TCGA_MolecularSubtype(colnames((BC1.T)[,diff.1]))$subtypes$subtype
+mol_subtypes.2 <-TCGA_MolecularSubtype(colnames((BC2.T)[,diff.2]))$subtypes$subtype
+mol_subtypes.1 = data.frame(subtype = mol_subtypes.1)
+mol_subtypes.2 = data.frame(subtype = mol_subtypes.2)
+mol_subtypes = rbind(mol_subtypes.1, mol_subtypes.2, normal)
+mol_subtypes <- make.names(mol_subtypes) ## make valid names
+```
+
+
+### Construct an object containing the sample name and the group of which it belongs, the samples must be in the same order as in the expression matrix.
+```{r}
+factorBC <- data.frame(Group = "PT", Sample = c(colnames(assay(BC1.T)[,diff.1]), colnames(assay(BC2.T)[,diff.2])))
+factorsNormalBC <- data.frame(Group = "Normal", Sample = c(colnames(BC1.N),colnames(BC2.N)))
+factors <- rbind(factorBC, factorsNormalBC)
+factors = cbind(factors, mol_subtypes)
+rownames(factors) <- factors$Sample
+Ready_factors <- as.data.frame(factors$Group)
+```
+
+
+
+### Filter low expressed genes
+```{r}
+dataFilt <- TCGAanalyze_Filtering(tabDF = rnas,
+                                  method = "quantile",
+                                  qnt.cut = 0.25)
+threshold <- round(dim(rnas)[2]/2)
+ridx <- rowSums(dataFilt == 0) <= threshold
+dataFilt <- dataFilt[ridx, ]
+dim(dataFilt)
+ridx <- rowMeans(dataFilt) >= 10
+dataFilt <- dataFilt[ridx, ]
+print(dim(dataFilt))
+rnas <- rnas[rownames(rnas) %in% rownames(dataFilt), ]
+dim(rnas)
+```
+#Filter the annotation file to get only the genes in the expression matrix. Check for duplicates and remove them if necessary.
+```{r}
+rownames(rnas) = gsub("\\..*","", rownames(rnas))
+inter <- intersect(rownames(rnas), annot$ensembl_gene_id)
+length(inter)
+rnas1 <- rnas[rownames(rnas) %in% inter,] #This is the raw expression matrix used in Step 2 as input for DESeq2
+dim(rnas1)
+annot1 <- annot[annot$ensembl_gene_id  %in% inter,]
+dim(annot1)
+annot1 <- annot1[!duplicated(annot1$ensembl_gene_id),]
+dim(annot1)
+annot1[annot1 == ""] <- NA 
+```
+
+### 
+
+```{r}
+ln.data <- withinLaneNormalization(rnas1, annot1$Length, which = "full")
+gcn.data <- withinLaneNormalization(ln.data , annot1$GC, which = "full")
+Btwn.Norm <- betweenLaneNormalization(gcn.data, which = "full") 
+norm.counts <- tmm(Btwn.Norm, long = 1000, lc = 0, k = 0)
+noiseqData <- NOISeq::readData(norm.counts, factors = Ready_factors)
+mydata2corr1 = NOISeq::ARSyNseq(noiseqData, norm = "n",  logtransf = FALSE)
+rnas2 <- exprs(mydata2corr1)
+dim(rnas2)
+```
+### Quality control
+```{r include=FALSE}
+library(ggbiplot)
+
+before.pca <- prcomp(t(rnas1),center = TRUE,scale. = TRUE)
+summary(before.pca)
+ggbiplot(before.pca, var.axes=FALSE, ellipse=TRUE, groups=factors$Group)
+
+after.pca <- prcomp(t(rnas2),center = TRUE,scale. = TRUE)
+summary(after.pca)
+ggbiplot(after.pca, var.axes=FALSE, ellipse=TRUE, groups=factors$Group)
+
+```
+
+
+### QC Report
+```{r}
+mydata_bf <- NOISeq::readData(
+  data = rnas1,
+  factors = factors,
+  length = annot1[,c("ensembl_gene_id", "Length")],
+  biotype = annot1[,c("ensembl_gene_id", "Type")],
+  chromosome = annot1[,c("Chr", "Start", "End")],
+  gc = annot1[, c("ensembl_gene_id", "GC")])
+
+QCreport(mydata_bf, samples = NULL, factor = "Group", norm = FALSE)
+
+mydata_after <- NOISeq::readData(
+  data = rnas2,
+  factors = factors,
+  length = annot1[,c("ensembl_gene_id", "Length")],
+  biotype = annot1[,c("ensembl_gene_id", "Type")],
+  chromosome = annot1[,c("Chr", "Start", "End")],
+  gc = annot1[, c("ensembl_gene_id", "GC")])
+
+QCreport(mydata_after, samples = NULL, factor = "Group", norm = TRUE)
+```
+## Select TNBC and non-TNBC 
+
+```{r}
+TNBC_samples = BRCA_clinicalMatrix %>%
+  filter(
+    breast_carcinoma_progesterone_receptor_status == "Negative" &
+      breast_carcinoma_estrogen_receptor_status == "Negative" &
+      lab_proc_her2_neu_immunohistochemistry_receptor_status == "Negative"
+    )
+TNBC_samples_in_rnas2 <- colnames(rnas2) %in% TNBC_samples$X_GENOMIC_ID_TCGA_BRCA_G4502A_07_3
+```
+
+
+
+```{r}
+#Save normalizaed counts
+BC_Norm <- rnas2[, factors$Group=="BC"]
+NormalBM_Norm <- rnas2[, factors$Group=="NormalBM"] 
+
+Aracne_MM_Norm <- cbind(rownames(MM_Norm), MM_Norm)
+Aracne_NormalBM_Norm <- cbind(rownames(NormalBM_Norm), NormalBM_Norm)
+
+colnames(Aracne_MM_Norm)[1] <- "gene"
+colnames(Aracne_NormalBM_Norm)[1] <- "gene"
+
+write.table(Aracne_MM_Norm, file = "rnas_norm_MM.tsv", row.names = FALSE, sep = "\t", quote = FALSE, col.names = FALSE)
+write.table(Aracne_NormalBM_Norm, file = "rnas_norm_NormalBMvsMM.tsv", row.names = TRUE, sep = "\t", quote = FALSE, col.names = TRUE)
+```
+
+#Save normalizaed counts
+
+```{r}
+
+subtypes = split(factors1, factors1$subtypes)
+
+Her2_Norm = as.data.frame(rnas2) %>% 
+  select(all_of(subtypes[["BRCA.Her2"]][["Sample"]]))
+
+basal_Norm <- rnas2[,factors1$subtypes=="BRCA.Basal"]
+
+
+Aracne_MM_Norm <- cbind(rownames(MM_Norm), MM_Norm)
+Aracne_NormalBM_Norm <- cbind(rownames(NormalBM_Norm), NormalBM_Norm)
+
+colnames(Aracne_MM_Norm)[1] <- "gene"
+colnames(Aracne_NormalBM_Norm)[1] <- "gene"
+
+write.table(Aracne_MM_Norm, file = "rnas_norm_MM.tsv", row.names = FALSE, sep = "\t", quote = FALSE, col.names = FALSE)
+write.table(Aracne_NormalBM_Norm, file = "rnas_norm_NormalBMvsMM.tsv", row.names = FALSE, sep = "\t", quote = FALSE, col.names = FALSE)
+```
+# Step2: Differential gene expression analysis
+#The unnormalized expression matrix was used to detect differentially expressed genes using the DESeq2 package.
+
+```{r}
+library(DESeq2)
+```
+
+#The input for this script is the unnormalized rnas1 object and the factors object created in the Stage 1.
+
+```{r}
+dds <- DESeqDataSetFromMatrix(countData = round(rnas1),
+                              colData = factors,
+                              design = ~ Group)
+
+dds <- DESeq(dds)
+```
+
+#Set the NormalBM group as the reference in the analysis
+```{r}
+
+```
+
+dds$Group <- relevel(dds$Group, ref = "NormalBM")
+dds <- DESeq(dds)
+
+# Log fold change shrinkage for visualization and ranking
+resLFC <- lfcShrink(dds, coef="Group_MM_vs_NormalBM", type="apeglm")
+
+write.table(resLFC, file = "resLFC_MM_vs_NormalBM.tsv", row.names = TRUE, col.names = NA, sep = "\t", quote = FALSE)
+
+
+
+
+
+
+
+
+
+
+
+
